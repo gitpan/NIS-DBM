@@ -1,4 +1,4 @@
-# $Id: DBM.pm,v 1.9 1999/08/09 18:10:09 jgsmith Exp $
+# $Id: DBM.pm,v 1.14 1999/09/24 20:31:02 jgsmith Exp $
 #
 # Copyright (c) 1999, Texas A&M University
 # All rights reserved.
@@ -11,11 +11,7 @@
 # 2. Redistributions in binary form must reproduce the above copyright
 #    notice, this list of conditions and the following disclaimer in the
 #    documentation and/or other materials provided with the distribution.
-# 3. All advertising materials mentioning features or use of this software
-#    must display the following acknowledgement:
-#      This product includes software developed by Texas A&M University
-#      and its contributors.
-# 4. Neither the name of the University nor the names of its contributors
+# 3. Neither the name of the University nor the names of its contributors
 #    may be used to endorse or promote products derived from this software
 #    without specific prior written permission.
 #
@@ -45,7 +41,7 @@ use LockFile::Simple qw(lock unlock);
 
 @ISA = qw( );
 
-$VERSION = '0.01';
+$VERSION = '0.02';
 
 sub whowasi {
   return ((caller(1))[3]);
@@ -279,6 +275,7 @@ sub FETCH {
   my $uname;
   my $uid;
   my %u;
+  my(%u_byuid, %u_byname);
   my $key_set = $self->{options}->{key_set};
 
   if($key_set ne 'byuid' and $key_set ne 'byname') {
@@ -317,31 +314,58 @@ sub FETCH {
 
   if(!$key_set || $key_set ne 'byuid') {
     # assume $key is a username first
-    $self->_fetch_records('byname', $key, \%u);
+    $self->_fetch_records('byname', $key, \%u_byname);
   }
 
-  if(scalar keys %u) {
+  if(scalar keys %u_byname) {
     $uname = $key;
-    $uid = $u{'uid'};
+    $uid = $u_byname{'uid'};
   } else {
     return undef if($key_set eq 'byname');
     $uid = $key;
   }
 
   if(defined $uid) {
-    $self->_fetch_records('byuid', $uid, \%u);
+    $self->_fetch_records('byuid', $uid, \%u_byuid);
   }
 
   unless($uname) {
-    $uname = $u{'username'};
-    $self->_fetch_records('byname', $uname, \%u);
+    $uname = $u_byuid{'username'};
+    $self->_fetch_records('byname', $uname, \%u_byname);
+  }
+
+  my($cache_byname, $cache_byuid) = ('CACHE','CACHE');
+  if($self->{'options'}->{'use_adjunct'}) {
+    $u_byuid{password} = $u_byname{password};
+  }
+  foreach my $k ((keys %u_byname), (keys %u_byuid)) {
+    next if exists $u{$k};
+    if($u_byname{$k} =~ /^\s*$/ && $u_byuid{$k}) {
+      carp "$k defined in byuid files but not in byname files";
+      if($cache_byname eq 'CACHE') {
+        carp "Byname files marked for update for $uname:$uid";
+        $cache_byname = 'MODS';
+      }
+      $u{$k} = $u_byuid{$k};
+    } elsif($u_byuid{$k} =~ /^\s*$/ && $u_byname{$k}) {
+      carp "$k defined in byname files but not in byuid files";
+      if($cache_byuid eq 'CACHE') {
+        carp "Byuid files marked for update for $uname:$uid";
+        $cache_byuid = 'MODS';
+      }
+      $u{$k} = $u_byname{$k};
+    } elsif($u_byname{$k} ne $u_byuid{$k}) {
+      croak "$k inconsistant - (byname,byuid) = ('$u_byname{$k}','$u_byuid{$k}')";
+    } else {
+      $u{$k} = $u_byname{$k};
+    }
   }
 
   if(scalar keys %u) {
     $u{'uid'} = $u{'uid'} + 0;
     $u{'gid'} = $u{'gid'} + 0;
-    $self->{'CACHE'}->{'byname'}->{$u{username}} = \%u;
-    $self->{'CACHE'}->{'byuid'}->{$u{uid}} = \%u;
+    $self->{$cache_byname}->{'byname'}->{$u{username}} = { %u };
+    $self->{$cache_byuid }->{'byuid'}->{$u{uid}} = { %u };
     return { %u };
   } else {
     return undef;
@@ -353,45 +377,82 @@ sub _fetch_records {
   my $type = shift;
   my $key  = shift;
   my $u    = shift;
+  my @dbfiles = grep { $_->{'type'} eq $type } @{$self->{'DB_FILES'}};
+  my %tu;
+  my %u;
+  my $cache = 'CACHE';
 
-  foreach my $db (grep { $_->{'type'} eq $type } @{$self->{'DB_FILES'}})
+  foreach my $i (0..$#dbfiles)
   { 
+    my $db = $dbfiles[$i];
     my $dbinfo = $db->{'handle'}->{$key};
+    my $dbname = $db->{'filename'};
     if(defined $dbinfo) {  
       my @dbinfo = split(/:/, $dbinfo);
       # do consistancy/sanity checks...
       if($self->{'options'}->{'use_adjunct'}) {
         if($db->{'filename'} !~ /adjunct/ and $dbinfo[1] ne "##$dbinfo[0]") 
         {
-          carp "Invalid data in passwd file ($$db{'filename'}), passwd field != ##$dbinfo[0]";
+          carp "Invalid data in passwd file ($dbname), passwd field != ##$dbinfo[0]";
         }
       }
+      $tu{'username'} = $dbinfo[0];
+      $tu{'uid'     } = $dbinfo[2];
+      $tu{'gid'     } = $dbinfo[3];
+      $tu{'gecos'   } = $dbinfo[4];
+      $tu{'home'    } = $dbinfo[5];
+      $tu{'shell'   } = $dbinfo[6];
 
-      $u->{'username'} = $dbinfo[0] unless $u->{'username'};
-      $u->{'uid'     } = $dbinfo[2] unless $u->{'uid'     };
-      $u->{'gid'     } = $dbinfo[3] unless $u->{'gid'     };
-      $u->{'gecos'   } = $dbinfo[4] unless $u->{'gecos'   };
-      $u->{'home'    } = $dbinfo[5] unless $u->{'home'    };
-      $u->{'shell'   } = $dbinfo[6] unless $u->{'shell'   };
+      delete $tu{'uid'} if($tu{'uid'} =~ /^\s*$/);
+      delete $tu{'gid'} if($tu{'gid'} =~ /^\s*$/);
 
-      delete $u->{'uid'} if($u->{'uid'} =~ /^\s*$/);
-      delete $u->{'gid'} if($u->{'gid'} =~ /^\s*$/);
-
-      $u->{'uid'} .= 'E0' if($u->{'uid'} == 0);
-      $u->{'gid'} .= 'E0' if($u->{'gid'} == 0);
+      $tu{'uid'} .= 'E0' if(exists $tu{'uid'} && !$tu{'uid'});
+      $tu{'gid'} .= 'E0' if(exists $tu{'gid'} && !$tu{'gid'});
 
       if($self->{'options'}->{'use_adjunct'}) {
         if($db->{'filename'} =~ /adjunct/) {
-          $u->{'password'} = $dbinfo[1] unless $u->{'password'};
+          $tu{'password'} = $dbinfo[1];
+          $u{password} = $tu{password} if $u{password} =~ /^(##\Q$u{username}\E|\s*)$/;
+          $tu{password} = $u{password} if $u{password} !~ /^(##\Q$u{username}\E|\s*)$/;
         }
       } else {
-        $u->{'password'} = $dbinfo[1] unless $u->{'password'};
+        $tu{'password'} = $dbinfo[1];
       }
-    } 
-
-    foreach my $k (keys %$u) {
-      delete $$u{$k} if $$u{$k} =~ /^\s*$/;
+      if($i) {
+        foreach my $k ((keys %tu), (keys %u)) {
+          next if exists $u{$k};
+          if($tu{$k} =~ /^\s*$/ && $u{$k}) {
+            carp "$k defined in $type files but not in $dbname";
+            if($cache eq 'CACHE') {
+              carp "$type files marked for update for $key";
+              $cache = 'MODS';
+            }
+            #$u{$k} = $tu{$k};
+          } elsif($u{$k} =~ /^\s*$/ && $tu{$k}) {
+            carp "$k defined in $dbname but not in $type files";
+            if($cache eq 'CACHE') {
+              carp "\U$type\E files marked for update for $key";
+              $cache = 'MODS';
+            }
+            $u{$k} = $tu{$k};
+          } elsif($tu{$k} ne $u{$k}) {
+            croak "$k inconsistant - ($type,$dbname) = ('$u{$k}','$tu{$k}')";
+          } else {
+            $u{$k} = $tu{$k};
+          }
+        }
+      } else {
+        %u = %tu;
+      }
     }
+
+    foreach my $k (keys %u) {
+      delete $u{$k} if $u{$k} =~ /^\s*$/;
+    }
+  }
+  %{$u} = %u;
+  if($cache ne 'CACHE') {
+    $self->{'MODS'}->{$cache}->{'MODS'}->{$key} = { %u };
   }
 }
 
@@ -821,11 +882,12 @@ record is marked for deletion.
 
 =item FIRSTKEY
 
-This function is not currently implemented.
+This function will initialize an array of keys and return the first.
+The keys are unordered.
 
 =item NEXTKEY
 
-This function is not currently implemented.
+This function will return the next key in the array of keys.
 
 =item DESTROY
 
@@ -949,10 +1011,7 @@ are met:
 
  1. Redistributions of source code must retain the above copyright notice, this list of conditions and the following disclaimer.
  2. Redistributions in binary form must reproduce the above copyright notice, this list of conditions and the following disclaimer in the documentation and/or other materials provided with the distribution.
- 3. All advertising materials mentioning features or use of this software must display the following acknowledgement:
-      This product includes software developed by 
-      Texas A&M University and its contributors.
- 4. Neither the name of the University nor the names of its contributors may be used to endorse or promote products derived from this software without specific prior written permission.
+ 3. Neither the name of the University nor the names of its contributors may be used to endorse or promote products derived from this software without specific prior written permission.
 
 THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTERS ``AS IS''
 AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
