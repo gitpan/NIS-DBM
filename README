@@ -1,0 +1,22 @@
+                                 -------------
+                                 NIS::DBM 0.01
+                                 -------------
+
+NIS::DBM presents the dbm files used by NIS as a single hash indexed by
+username and uid (when in doubt, it's a username).  The tie supports all
+normal hash operations except clearing the hash (we don't want to easily
+get rid of the entire database).  The code tries to minimize the file
+operations needed to correctly present the information and modify the
+dbm files.
+
+To install, simply type
+
+     $ perl Makefile.PL
+     $ make
+     $ make install
+
+See the example configuration file in sample/accounts.conf.  This should be
+copied to a suitable place and the daemons and other code be made aware of it.
+A sample yppasswd daemon is provided in sample/ also along with the Makefile
+for the C code to tie the Perl functions to the RPC interface.  This uses the
+Sun/Solaris RPC definition (.x) file (or at least an approximation of it).
